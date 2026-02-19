@@ -1,10 +1,7 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from fastapi import FastAPI, UploadFile, Form
-from fastapi.responses import JSONResponse
-from datetime import datetime
-
-app = FastAPI(title="PharmaGuard API")
- from fastapi.middleware.cors import CORSMiddleware
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -13,6 +10,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from fastapi import FastAPI, UploadFile, Form
+from fastapi.responses import JSONResponse
+from datetime import datetime
+
+app = FastAPI(title="PharmaGuard API")
 
 
 # ------------------------
