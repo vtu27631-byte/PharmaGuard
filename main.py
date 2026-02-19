@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, Form
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from datetime import datetime
@@ -51,64 +51,69 @@ def parse_vcf(content):
 
 
 @app.post("/analyze")
-async def analyze(file: UploadFile, drugs: str = Form(...)):
+async def analyze(file: UploadFile = File(...), drug: str = Form(...)):
 
     content = (await file.read()).decode("utf-8")
     detected_variants, total_scanned = parse_vcf(content)
 
-    drug_list = [d.strip().upper() for d in drugs.split(",")]
+    drug = drug.upper()
 
-    responses = []
+    risk_label = "Safe"
+    severity = "none"
+    primary_gene = "Unknown"
 
-    for drug in drug_list:
+    rule = DRUG_GENE_RULES.get(drug)
 
-        gene_rule = DRUG_GENE_RULES.get(drug)
-        risk_label = "Safe"
-        severity = "none"
-        primary_gene = "Unknown"
+    if rule:
+        rule_gene, rule_risk, rule_severity = rule
+        primary_gene = rule_gene
 
-        if gene_rule:
-            rule_gene, rule_risk, rule_severity = gene_rule
-            primary_gene = rule_gene
+        for var in detected_variants:
+            if var["gene"] == rule_gene:
+                risk_label = rule_risk
+                severity = rule_severity
 
-            for var in detected_variants:
-                if var["gene"] == rule_gene:
-                    risk_label = rule_risk
-                    severity = rule_severity
+    response = {
+        "patient_id": f"PATIENT_{uuid.uuid4().hex[:6].upper()}",
+        "drug": drug,
+        "timestamp": datetime.utcnow().isoformat(),
 
-        response = {
-            "patient_id": f"PATIENT_{uuid.uuid4().hex[:6].upper()}",
-            "drug": drug,
-            "timestamp": datetime.utcnow().isoformat(),
-            "risk_assessment": {
-                "risk_label": risk_label,
-                "confidence_score": 0.92,
-                "severity": severity
-            },
-            "pharmacogenomic_profile": {
-                "primary_gene": primary_gene,
-                "diplotype": "*1/*2",
-                "phenotype": "IM" if severity != "none" else "NM",
-                "detected_variants": detected_variants
-            },
-            "clinical_recommendation": {
-                "action": "Follow CPIC guideline recommendation",
-                "cpic_guideline_reference": "CPIC Level A",
-                "dose_adjustment": "Adjust dose if indicated based on phenotype"
-            },
-            "llm_generated_explanation": {
-                "summary": f"{primary_gene} genotype influences {drug} metabolism.",
-                "biological_mechanism": "Variant alters enzyme activity affecting drug metabolism pathways.",
-                "variant_citations": [v["rsid"] for v in detected_variants]
-            },
-            "quality_metrics": {
-                "vcf_parsing_success": True,
-                "total_variants_scanned": total_scanned,
-                "relevant_variants_found": len(detected_variants),
-                "analysis_confidence": 0.92
-            }
+        "risk_assessment": {
+            "risk_label": risk_label,
+            "confidence_score": 0.92,
+            "severity": severity
+        },
+
+        "pharmacogenomic_profile": {
+            "primary_gene": primary_gene,
+            "diplotype": "*1/*2",
+            "phenotype": "IM" if severity != "none" else "NM",
+            "detected_variants": detected_variants
+        },
+
+        "clinical_recommendation": {
+            "action": "Follow CPIC guideline recommendation",
+            "cpic_guideline_reference": "CPIC Level A",
+            "dose_adjustment": "Adjust dose if indicated"
+        },
+
+        "llm_generated_explanation": {
+            "summary": f"{primary_gene} genotype influences {drug} metabolism.",
+            "biological_mechanism": "Variant alters enzyme activity affecting metabolism.",
+            "variant_citations": [v["rsid"] for v in detected_variants]
+        },
+
+        "quality_metrics": {
+            "vcf_parsing_success": True,
+            "total_variants_scanned": total_scanned,
+            "relevant_variants_found": len(detected_variants),
+            "analysis_confidence": 0.92
         }
+    }
 
-        responses.append(response)
+    return response
 
-    return JSONResponse(content=responses)
+
+@app.get("/")
+def root():
+    return {"message": "PharmaGuard API is running."}
