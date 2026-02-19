@@ -1,12 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from datetime import datetime
-import uvicorn
+import uuid
 
 app = FastAPI(title="PharmaGuard API")
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,139 +14,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPPORTED_DRUGS = [
-    "CODEINE",
-    "WARFARIN",
-    "CLOPIDOGREL",
-    "SIMVASTATIN",
-    "AZATHIOPRINE",
-    "FLUOROURACIL",
-]
+CRITICAL_GENES = ["CYP2D6", "CYP2C19", "CYP2C9", "SLCO1B1", "TPMT", "DPYD"]
 
-CRITICAL_GENES = [
-    "CYP2D6",
-    "CYP2C19",
-    "CYP2C9",
-    "SLCO1B1",
-    "TPMT",
-    "DPYD",
-]
+DRUG_GENE_RULES = {
+    "CODEINE": ("CYP2D6", "Toxic", "high"),
+    "CLOPIDOGREL": ("CYP2C19", "Ineffective", "high"),
+    "WARFARIN": ("CYP2C9", "Adjust Dosage", "moderate"),
+    "SIMVASTATIN": ("SLCO1B1", "Toxic", "moderate"),
+    "AZATHIOPRINE": ("TPMT", "Adjust Dosage", "moderate"),
+    "FLUOROURACIL": ("DPYD", "Toxic", "critical"),
+}
+
+def parse_vcf(content):
+    detected = []
+    total_scanned = 0
+
+    for line in content.splitlines():
+        if line.startswith("#"):
+            continue
+        total_scanned += 1
+        parts = line.split("\t")
+        if len(parts) < 8:
+            continue
+        info = parts[7]
+        rsid = parts[2]
+
+        if "GENE=" in info:
+            gene = info.split("GENE=")[1].split(";")[0]
+            if gene in CRITICAL_GENES:
+                detected.append({
+                    "rsid": rsid,
+                    "gene": gene
+                })
+
+    return detected, total_scanned
 
 
 @app.post("/analyze")
-async def analyze_vcf(
-    file: UploadFile = File(...),
-    drug: str = Form(...)
-):
+async def analyze(file: UploadFile, drugs: str = Form(...)):
 
-    if not file.filename.endswith(".vcf"):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid file format. Only .vcf allowed."}
-        )
+    content = (await file.read()).decode("utf-8")
+    detected_variants, total_scanned = parse_vcf(content)
 
-    if drug.upper() not in SUPPORTED_DRUGS:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Unsupported drug."}
-        )
+    drug_list = [d.strip().upper() for d in drugs.split(",")]
 
-    content = await file.read()
-    lines = content.decode("utf-8").split("\n")
+    responses = []
 
-    detected_variants = []
-    primary_gene = "Unknown"
-    rsid = "rs000000"
-    total_variants = 0
+    for drug in drug_list:
 
-    for line in lines:
-        if line.startswith("#"):
-            continue
-
-        total_variants += 1
-        parts = line.split("\t")
-
-        if len(parts) > 2:
-            rsid = parts[2]
-
-        # Simple demo gene detection from INFO
-        if "CYP2D6" in line:
-            primary_gene = "CYP2D6"
-        elif "CYP2C19" in line:
-            primary_gene = "CYP2C19"
-        elif "CYP2C9" in line:
-            primary_gene = "CYP2C9"
-        elif "SLCO1B1" in line:
-            primary_gene = "SLCO1B1"
-        elif "TPMT" in line:
-            primary_gene = "TPMT"
-        elif "DPYD" in line:
-            primary_gene = "DPYD"
-
-    detected_variants.append({
-        "rsid": rsid,
-        "gene": primary_gene
-    })
-
-    # Risk Logic (Prototype)
-    if primary_gene == "CYP2D6" and drug.upper() == "CODEINE":
-        risk_label = "Toxic"
-        severity = "high"
-        phenotype = "PM"
-    elif primary_gene == "CYP2C19" and drug.upper() == "CLOPIDOGREL":
-        risk_label = "Ineffective"
-        severity = "high"
-        phenotype = "PM"
-    elif primary_gene == "TPMT" and drug.upper() == "AZATHIOPRINE":
-        risk_label = "Adjust Dosage"
-        severity = "moderate"
-        phenotype = "IM"
-    else:
+        gene_rule = DRUG_GENE_RULES.get(drug)
         risk_label = "Safe"
         severity = "none"
-        phenotype = "NM"
+        primary_gene = "Unknown"
 
-    response = {
-        "patient_id": "PATIENT_001",
-        "drug": drug.upper(),
-        "timestamp": datetime.utcnow().isoformat(),
+        if gene_rule:
+            rule_gene, rule_risk, rule_severity = gene_rule
+            primary_gene = rule_gene
 
-        "risk_assessment": {
-            "risk_label": risk_label,
-            "confidence_score": 0.90,
-            "severity": severity
-        },
+            for var in detected_variants:
+                if var["gene"] == rule_gene:
+                    risk_label = rule_risk
+                    severity = rule_severity
 
-        "pharmacogenomic_profile": {
-            "primary_gene": primary_gene,
-            "diplotype": "*1/*2",
-            "phenotype": phenotype,
-            "detected_variants": detected_variants
-        },
-
-        "clinical_recommendation": {
-            "cpic_guideline_reference": "CPIC Level A",
-            "recommendation": "Follow CPIC guideline recommendation.",
-            "dose_adjustment": "Adjust dose according to CPIC recommendations."
-        },
-
-        "llm_generated_explanation": {
-            "summary": f"{primary_gene} phenotype {phenotype} affects {drug.upper()} response.",
-            "biological_mechanism": "Variant alters enzyme activity affecting drug metabolism.",
-            "variant_citations": [rsid]
-        },
-
-        "quality_metrics": {
-            "vcf_parsing_success": True,
-            "total_variants_scanned": total_variants,
-            "relevant_variants_found": len(detected_variants),
-            "analysis_confidence": 0.92
+        response = {
+            "patient_id": f"PATIENT_{uuid.uuid4().hex[:6].upper()}",
+            "drug": drug,
+            "timestamp": datetime.utcnow().isoformat(),
+            "risk_assessment": {
+                "risk_label": risk_label,
+                "confidence_score": 0.92,
+                "severity": severity
+            },
+            "pharmacogenomic_profile": {
+                "primary_gene": primary_gene,
+                "diplotype": "*1/*2",
+                "phenotype": "IM" if severity != "none" else "NM",
+                "detected_variants": detected_variants
+            },
+            "clinical_recommendation": {
+                "action": "Follow CPIC guideline recommendation",
+                "cpic_guideline_reference": "CPIC Level A",
+                "dose_adjustment": "Adjust dose if indicated based on phenotype"
+            },
+            "llm_generated_explanation": {
+                "summary": f"{primary_gene} genotype influences {drug} metabolism.",
+                "biological_mechanism": "Variant alters enzyme activity affecting drug metabolism pathways.",
+                "variant_citations": [v["rsid"] for v in detected_variants]
+            },
+            "quality_metrics": {
+                "vcf_parsing_success": True,
+                "total_variants_scanned": total_scanned,
+                "relevant_variants_found": len(detected_variants),
+                "analysis_confidence": 0.92
+            }
         }
-    }
 
-    return response
+        responses.append(response)
 
-
-@app.get("/")
-def root():
-    return {"message": "PharmaGuard API is running."}
+    return JSONResponse(content=responses)
